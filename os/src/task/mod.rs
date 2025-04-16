@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -119,6 +120,42 @@ impl TaskManager {
         let inner = self.inner.exclusive_access();
         inner.tasks[inner.current_task].get_user_token()
     }
+    
+    /// map
+    fn map(&self, start: usize, len: usize, port: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+        let mut perm = MapPermission::U;
+        if port & 0x1 != 0 {
+            perm |= MapPermission::R;
+        }
+        if port & 0x2 != 0 {
+            perm |= MapPermission::W;
+        }
+        if port & 0x4 != 0 {
+            perm |= MapPermission::X;
+        }
+
+        let result = inner.tasks[current].memory_set.map_framed_area(start_va, end_va, perm);
+        if result {
+            return 0;
+        }
+        -1
+    }
+    /// unmap
+    fn unmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+        let ret = inner.tasks[current].memory_set.unmap_framed_area(start_va, end_va);
+        if ret {
+            return 0;
+        }
+        -1
+    }
 
     /// Get the current 'Running' task's trap contexts.
     fn get_current_trap_cx(&self) -> &'static mut TrapContext {
@@ -191,6 +228,16 @@ pub fn exit_current_and_run_next() {
 /// Get the current 'Running' task's token.
 pub fn current_user_token() -> usize {
     TASK_MANAGER.get_current_token()
+}
+
+/// map
+pub fn syscall_map(start: usize, len: usize, port: usize) -> isize {
+    TASK_MANAGER.map(start, len, port)
+}
+
+/// unmap
+pub fn syscall_unmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.unmap(start, len)
 }
 
 /// Get the current 'Running' task's trap contexts.
