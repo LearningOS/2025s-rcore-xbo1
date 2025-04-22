@@ -183,4 +183,97 @@ impl Inode {
         });
         block_cache_sync_all();
     }
+
+    /// stat a file
+    pub fn fstat(&self, ino: &mut u64, mode: &mut u32, nlink: &mut u32) -> isize {
+        get_block_cache(self.block_id, Arc::clone(&self.block_device))
+            .lock()
+            .read(self.block_offset, |inode: &DiskInode| {
+                // 不确定是否正确
+                let mut dirent = DirEntry::empty();
+                inode.read_at(0, dirent.as_bytes_mut(), &self.block_device);
+                *ino = dirent.inode_id() as u64;
+                if inode.is_dir() {
+                    *mode = 0o040000;
+                } else {
+                    *mode = 0o100000;
+                }
+                *nlink = inode.nlink;
+                0
+            })
+        
+    }
+
+    /// linkat
+    pub fn linkat(&self, old_name: &str, new_name: &str) -> isize {
+        let inode_id = self.read_disk_inode(|disk_inode| {
+            if self.find_inode_id(new_name, disk_inode).is_some() {
+                return None;
+            }
+            self.find_inode_id(old_name, disk_inode)
+        });
+
+        if let Some(inode_id) = inode_id {
+            self.modify_disk_inode(|root_inode| {
+                // append file in the dirent
+                let file_count = (root_inode.size as usize) / DIRENT_SZ;
+                let new_size = (file_count + 1) * DIRENT_SZ;
+                // increase size
+                let mut fs = self.fs.lock();
+                self.increase_size(new_size as u32, root_inode, &mut fs);
+                // write dirent
+                let dirent = DirEntry::new(new_name, inode_id);
+                root_inode.write_at(
+                    file_count * DIRENT_SZ,
+                    dirent.as_bytes(),
+                    &self.block_device,
+                );
+            });
+            let fs = self.fs.lock();
+            let (inode_block_id, inode_block_offset) = fs.get_disk_inode_pos(inode_id);
+            get_block_cache(inode_block_id as usize, Arc::clone(&self.block_device))
+                .lock()
+                .modify(inode_block_offset, |new_inode: &mut DiskInode| {
+                    new_inode.nlink += 1;
+                });
+            return 0;
+        }
+        -1
+    }
+
+    /// unlinkat 
+    pub fn unlinkat(&self, name: &str) -> isize {
+        let inode_id = self.read_disk_inode(|disk_inode| {
+            self.find_inode_id(name, disk_inode)
+        });
+
+        if let Some(inode_id) = inode_id {
+            let fs = self.fs.lock();
+            self.modify_disk_inode(|disk_inode| {
+                // append file in the dirent
+                let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+                let mut dirent = DirEntry::empty();
+                for i in (0..file_count).rev() {
+                    assert_eq!(
+                        disk_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                        DIRENT_SZ,
+                    );
+                    if dirent.name() == name {
+                        // 覆盖无效的数据当成文件删除
+                        disk_inode.write_at(DIRENT_SZ * i, DirEntry::empty().as_bytes(), &self.block_device);
+                        break;
+                    }
+                }
+            });
+            let (inode_block_id, inode_block_offset) = fs.get_disk_inode_pos(inode_id);
+            let _nlink =  get_block_cache(inode_block_id as usize, Arc::clone(&self.block_device))
+                .lock()
+                .modify(inode_block_offset, |new_inode: &mut DiskInode| {
+                    new_inode.nlink -= 1;
+                    return new_inode.nlink;
+                });
+            return 0;
+        }
+        -1
+    }
 }
